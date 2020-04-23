@@ -6008,6 +6008,86 @@ static void process_refresh_certs_command(conn *c, token_t *tokens, const size_t
     return;
 }
 #endif
+#ifdef MCROUTER_COMPAT
+static void process_metaget_command(conn *c, token_t *tokens, const size_t ntokens) {
+    char *key;
+    size_t nkey;
+    item *it;
+    token_t *key_token = &tokens[KEY_TOKEN];
+    bool fail_length = false;
+    bool overflow;
+
+    assert(c != NULL);
+    mc_resp *resp = c->resp;
+
+    key = key_token->value;
+    nkey = key_token->length;
+
+    if (nkey > KEY_MAX_LENGTH) {
+        fail_length = true;
+        goto stop;
+    }
+
+    it = limited_get(key, nkey, c, 0, false, DO_UPDATE, &overflow);
+    if (settings.detail_enabled) {
+        stats_prefix_record_get(key, nkey, NULL != it);
+    }
+    if (it) {
+        char *p = resp->wbuf;
+        memcpy(p, "META ", 5);
+        p += 5;
+
+        memcpy(p, key, nkey);
+        p += nkey;
+
+        memcpy(p, " age: unknown; exptime: ", 24);
+        p += 24;
+
+        if (it->exptime == 0) {
+            *p = '0';
+            p += 1;
+        } else {
+            p = itoa_u32(it->exptime - current_time, p);
+        }
+
+        memcpy(p, "; from: unknown\r\n", 17);
+        p += 17;
+
+        resp_add_iov(resp, resp->wbuf, p - resp->wbuf);
+
+        if (settings.verbose > 1) {
+            int ii;
+            fprintf(stderr, ">%d sending key metadata ", c->sfd);
+            for (ii = 0; ii < it->nkey; ++ii) {
+                fprintf(stderr, "%c", key[ii]);
+            }
+            fprintf(stderr, "\n");
+        }
+
+        pthread_mutex_lock(&c->thread->stats.mutex);
+        c->thread->stats.lru_hits[it->slabs_clsid]++;
+        c->thread->stats.get_cmds++;
+        MEMCACHED_COMMAND_GET(c->sfd, key, nkey,
+                              it->nbytes, ITEM_get_cas(it));
+        pthread_mutex_unlock(&c->thread->stats.mutex);
+    } else {
+        pthread_mutex_lock(&c->thread->stats.mutex);
+        c->thread->stats.get_misses++;
+        c->thread->stats.get_cmds++;
+        MEMCACHED_COMMAND_GET(c->sfd, key, nkey, -1, 0);
+        pthread_mutex_unlock(&c->thread->stats.mutex);
+    }
+
+stop:
+    if (fail_length) {
+        out_string(c, "CLIENT_ERROR bad command line format");
+    } else {
+      resp_add_iov(resp, "END\r\n", 5);
+    }
+
+    conn_set_state(c, conn_mwrite);
+}
+#endif
 
 // TODO: pipelined commands are incompatible with shifting connections to a
 // side thread. Given this only happens in two instances (watch and
@@ -6215,6 +6295,11 @@ static void process_command(conn *c, char *command) {
 #ifdef TLS
     } else if (strcmp(tokens[COMMAND_TOKEN].value, "refresh_certs") == 0) {
         process_refresh_certs_command(c, tokens, ntokens);
+#endif
+#ifdef MCROUTER_COMPAT
+    } else if (strcmp(tokens[COMMAND_TOKEN].value, "metaget") == 0) {
+        WANT_TOKENS(ntokens, 3, 3);
+        process_metaget_command(c, tokens, ntokens);
 #endif
     } else {
         if (strncmp(tokens[ntokens - 2].value, "HTTP/", 5) == 0) {
