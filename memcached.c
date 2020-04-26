@@ -6047,7 +6047,7 @@ static void process_metaget_command(conn *c, token_t *tokens, const size_t ntoke
             *p = '0';
             p += 1;
         } else {
-            p = itoa_u32(it->exptime - current_time, p);
+            p = itoa_u32((uint32_t)(it->exptime + process_started), p);
         }
 
         memcpy(p, "; from: unknown\r\n", 17);
